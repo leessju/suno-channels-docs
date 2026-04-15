@@ -235,3 +235,54 @@ const showInterlude = interludeRanges.some(
 - Variant Zap 기준 실측: 최소 간주 30.44초, 최대 49.72초
 - 8초보다 낮추면 짧은 가사 공백도 간주로 감지될 수 있음
 - 곡마다 다를 수 있으므로 변경 전 다른 곡에서도 검증 필요
+
+---
+
+## 9. 인트로 영상 추가 (미구현, 설계 완료)
+
+Remotion의 `<Sequence>` + `<OffthreadVideo>` 조합으로 인트로 영상을 최상위 레이어로 삽입 가능.
+
+### 구조
+
+```tsx
+<AbsoluteFill>
+  {/* 기존 본편 — 인트로 길이만큼 뒤로 밀림 */}
+  <Sequence from={introFrames} durationInFrames={mainDuration}>
+    <Audio src={audioFileUrl} />
+    <Background ... />
+    <LyricsBox ... />
+    ...
+  </Sequence>
+
+  {/* 인트로 영상 — 최상위 레이어, introFrames 동안만 표시 */}
+  <Sequence from={0} durationInFrames={introFrames}>
+    <OffthreadVideo src={staticFile("intro.mp4")} />
+  </Sequence>
+</AbsoluteFill>
+```
+
+### 페이드 전환 추가 시
+
+```tsx
+// 인트로 마지막 30프레임 동안 opacity 1 → 0
+const introOpacity = interpolate(
+  frame,
+  [introFrames - 30, introFrames],
+  [1, 0],
+  { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+);
+```
+
+### 구현 체크리스트
+
+- [ ] 인트로 영상 파일 → `public/intro.mp4` 배치
+- [ ] `introFrames` = 인트로 길이(초) × fps 계산
+- [ ] `durationInFrames` = introFrames + 본편 길이
+- [ ] 오디오 `audioOffsetInSeconds` 조정 불필요 (Sequence from으로 제어)
+- [ ] `render.sh`에 인트로 파일 경로 파라미터 추가
+
+### 활용 시나리오
+
+- 채널 로고 인트로 (3~5초) → 본편 자동 전환
+- 플레이리스트 타이틀 카드 → 각 곡 앞에 삽입
+- 후원/구독 CTA 아웃트로 영상 (동일 패턴으로 끝에도 적용 가능)

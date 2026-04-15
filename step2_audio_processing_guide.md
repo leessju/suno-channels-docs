@@ -47,9 +47,10 @@ mp3
  │      - 보컬 분리
  │      - vocals.wav 저장
  │
- ├─→ [B] Whisper STT (medium)
+ ├─→ [B] mlx-whisper STT (medium, Apple Silicon)
  │      입력: mp3 + vocals.wav (둘 다 사용, 보완)
  │      출력: segments + words + timestamps
+ │      (VAD는 faster-whisper tiny — mlx-whisper에 vad_filter 없음)
  │
  ├─→ [C] txt 매칭 파이프라인
  │      - 순서 제약 매칭
@@ -67,9 +68,9 @@ mp3
  │      - 겹침 해소 + 작은 갭(<6초) 메우기
  │      - words 클램핑 + 역전 엔트리 제거
  │
- ├─→ [E] 번역 (Vertex AI Gemini)
- │      - 한국어, 영어, 기타 다국어
- │      - 줄 단위 번역 유지
+ ├─→ [E] 번역 (Vertex AI Gemini 2.5 Flash)
+ │      - 영어 번역 (--force로 재번역 가능)
+ │      - 줄 단위 번역 유지, 30줄 배치
  │
  └─→ [F] SRT 생성
         - 언어별 SRT 파일

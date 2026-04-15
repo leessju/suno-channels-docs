@@ -206,15 +206,29 @@ python scripts/batch_verify.py {플레이리스트_폴더}
 
 ---
 
-## 7. mlx-whisper 전환 (예정)
+## 7. mlx-whisper 전환 (완료 — 2026-04-13)
 
-현재: `faster-whisper` (CUDA/MPS)
-예정: `mlx-whisper` (Apple Silicon Metal GPU 직접 활용)
+**이전:** `faster-whisper` (CPU int8, 곡당 ~42초)
+**현재:** `mlx-whisper` (Apple Silicon MLX, 곡당 ~9초, **4.5배 빠름**)
 
-- `pip install mlx-whisper`
-- API 거의 동일 → `extract_lyrics.py` 최소 수정
-- M1/M2/M3에서 속도 향상 예상
-- **아직 미구현. 다음 세션에서 진행 예정.**
+### 전환 내용
+- `extract_lyrics.py`의 `extract_lyrics()` 함수: mlx-whisper 우선, faster-whisper fallback
+- 모델: `mlx-community/whisper-medium` (HuggingFace MLX 변환 모델)
+- VAD는 여전히 faster-whisper tiny 사용 (mlx-whisper에 `vad_filter` 옵션 없음)
+- mlx-whisper 특유 노이즈 필터 추가: `^[-─—\s.…♪*]+$` 패턴 세그먼트 자동 제거
+
+### 성능 비교 (20곡 배치, medium 모델, M1 Pro)
+| 항목 | faster-whisper | mlx-whisper |
+|------|---------------|-------------|
+| 곡당 시간 | ~42초 | ~9초 |
+| 20곡 총 시간 | ~840초 (14분) | ~180초 (3분) |
+| 매칭 품질 | 기준 | 동등 |
+| 노이즈 세그먼트 | 적음 | 많음 (필터 적용) |
+
+### 주의사항
+- mlx-whisper는 **비결정적 출력** — 동일 입력에 약간 다른 결과 가능
+- temperature 기본 튜플 `(0.0, 0.2, 0.4, 0.6, 0.8, 1.0)`이 0.0 고정보다 품질 우수
+- 일부 곡에서 첫 가사 타이밍이 수초 늦게 감지될 수 있음 (수동 조정 필요)
 
 ---
 
@@ -222,7 +236,7 @@ python scripts/batch_verify.py {플레이리스트_폴더}
 
 | 파일 | 역할 |
 |------|------|
-| `scripts/extract_lyrics.py` | 핵심 전처리 (1200줄+) |
+| `scripts/extract_lyrics.py` | 핵심 전처리 (1322줄, mlx-whisper primary) |
 | `scripts/generate_lyrics_txt.py` | txt 없을 때 Gemini STT로 자동 생성 |
 | `scripts/verify_lyrics.py` | 기본 검증 |
 | `scripts/verify_all.py` | 정밀 검증 |

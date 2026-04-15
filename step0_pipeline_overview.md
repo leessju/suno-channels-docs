@@ -20,7 +20,7 @@
 │ STAGE 2: 오디오 후처리                                     │
 │  입력: mp3                                                 │
 │  출력: vocals.wav + lyrics.json + translated.json + srt   │
-│  도구: Demucs (MPS), Whisper (medium), Vertex Gemini       │
+│  도구: Demucs (MPS), mlx-whisper (medium), Vertex Gemini   │
 │  문서: audio_processing_guide.md                           │
 └──────────────────────────────────────────────────────────┘
                       ↓
@@ -71,16 +71,17 @@
 │       │   └── cover/             ← 1번곡 전용 (썸네일 겸용)
 │       └── phonk/                 ← p_001~p_NNN.png
 │           └── cover/             ← 1번곡 전용
-├── jpop/                          ← 季節のプレイリスト 채널
+├── jpop/                          ← 季節のプレイリスト 채널 + Lucid White 채널 공용
 │   └── {YYMMDD}_{playlist-name}/  ← 플레이리스트 폴더
 │       ├── 01_songs/              ← mp3 + jpeg + lyrics.json + txt
 │       ├── 02_videos/             ← Remotion 렌더 (가로 1920x1080)
 │       ├── 03_subtitles/          ← SRT 다국어 자막
 │       ├── 04_final/              ← 머지 풀영상 + silence + concat_list
 │       ├── 05_shorts/              ← 쇼츠 (세로 1080x1920)
+│       │   └── upload_result_lucidwhite.json  ← Lucid White 업로드 결과
 │       ├── thumbnails/             ← 최종 썸네일 5장
 │       ├── tracklist.txt           ← YouTube 설명 타임스탬프
-│       └── youtube_meta.json       ← 제목/설명/태그
+│       └── youtube_meta.json       ← 제목/설명/태그 (title 필드 → 쇼츠 오버레이에도 사용)
 ├── cafe/                          ← Hazy Roast 채널
 ├── phonk/                         ← ZERO MERCY BEATS 채널
 └── _raw/                          ← 원본, 리서치, 후보 자료
@@ -94,7 +95,7 @@
 |------|------|------|
 | 플레이리스트 폴더 | `{YYMMDD}_{name}` | `260402_hero-vol1` |
 | 곡 파일 | `{번호}_{곡명}.{확장자}` | `01_ヒーローになれなくても.mp3` |
-| 풀영상 | `{playlist_name}_full.mp4` | `hero-vol1_full.mp4` |
+| 풀영상 | `{playlist_name}_final.mp4` | `hero-vol1_final.mp4` |
 | 쇼츠 | `{번호}_{곡명}_shorts.mp4` | `01_ヒーローになれなくても_shorts.mp4` |
 | 썸네일 | `{playlist_name}.png` (1280x720) | `hero-vol1.png` |
 
@@ -113,12 +114,12 @@
 
 ### STAGE 2: 오디오
 - Demucs는 **MPS(Apple GPU) 필수** (`-d mps`) — CPU 대비 3배 빠름
-- Whisper는 **medium** 모델 (큰 모델은 일본어 정확도 떨어질 수 있음)
+- Whisper STT는 **mlx-whisper medium** (Apple Silicon, 곡당 ~9초) — faster-whisper는 VAD/fallback 전용
 - 가사는 4중 검증: txt 순서 / 중복 / 겹침 / words
-- 번역은 Vertex AI Gemini (account3 크레딧)
+- 번역은 Vertex AI Gemini 2.5 Flash → **영어** (account3 크레딧)
 
 ### STAGE 3: 영상
-- **nohup 필수** (프로세스 종료 시 moov atom 에러)
+- **nohup 사용 주의** — ffmpeg 무한루프, 좀비 프로세스, 로그 손상 이슈 확인됨. `render_all_jpop.sh` (프로세스 격리+watchdog) 또는 직접 세션 실행 권장
 - 곡 간 **1.5초 무음 갭** 필수
 - 재정렬 시 **4종 세트(mp3, jpeg, lyrics.json, txt) 함께 이동**
 - 병렬 쇼츠 생성 시 **tmp 경로 곡별 분리** (파일 충돌 방지)
@@ -208,6 +209,7 @@ def run_full_pipeline(
 | 채널 | 장르 | 스타일 | Suno 프롬프트 | 15분+ |
 |------|------|--------|--------------|:---:|
 | **季節のプレイリスト** (jpop) | 감성 J-POP, 락발라드 | emotional rock ballad, acoustic pop | bright piano, acoustic guitar, string ensemble | ✅ |
+| **Lucid White** (jpop 폴더 공용) | 멜랑콜릭 J-POP, 감성 비주얼라이저 | melancholic J-POP, synced lyrics | Glassmorphism 오버레이 쇼츠 특화 채널 | ✅ |
 | **Hazy Roast** (cafe) | 카페, lo-fi | instrumental jazz, lo-fi hip hop | warm vinyl, soft piano, chill beats | ❌ |
 | **ZERO MERCY BEATS** (phonk) | Phonk, EDM | brazilian phonk, hard bass | aggressive 808, distortion, cowbell | ❌ |
 
@@ -247,16 +249,19 @@ def run_full_pipeline(
 ~/Projects/clones/
 ├── zach-suno-api/              ← Suno API 자동화
 ├── suno-video/                 ← Remotion 영상 파이프라인
-│   ├── scripts/render.sh       ← 렌더 스크립트
+│   ├── scripts/render.sh       ← 단일 곡 8단계 렌더 (530줄)
+│   ├── scripts/render_all_jpop.sh  ← 5볼륨 배치 렌더 (프로세스 격리, watchdog)
 │   ├── scripts/render_playlist.sh  ← 플레이리스트 전체 렌더
+│   ├── scripts/extract_lyrics.py   ← 가사 추출 (mlx-whisper primary, 1322줄)
 │   └── src/                    ← React/Remotion 코드
 └── ismir25-ai-music-detector/  ← AI 음악 감지 (참고용)
 
 ~/.claude/
-├── youtube_token_jpop.json     ← 季節のプレイリスト OAuth
-├── youtube_token_cafe.json     ← Hazy Roast OAuth
-├── youtube_token_phonk.json    ← ZERO MERCY BEATS OAuth
-└── gems/gemini_keys.json       ← Gemini API 키 (무료 11개)
+├── youtube_token_jpop.json          ← 季節のプレイリスト OAuth
+├── youtube_token_lucidwhite.json    ← Lucid White OAuth (channel: UCoHpJmMju00FPBogQr6D_Kw)
+├── youtube_token_cafe.json          ← Hazy Roast OAuth
+├── youtube_token_phonk.json         ← ZERO MERCY BEATS OAuth
+└── gems/gemini_keys.json            ← Gemini API 키 (무료 11개)
 
 ~/Projects/claude/test/niche_bending/
 └── infra/credentials_account3.json  ← Vertex AI 인증
@@ -341,7 +346,7 @@ python /tmp/post_comments.py new-playlist
 |------|------------------|
 | Suno 생성 (v1+v2 40곡) | 30~60분 |
 | Demucs 분리 (MPS) | 7분 (20초/곡) |
-| Whisper STT | 10분 |
+| mlx-whisper STT | 3분 (faster-whisper: 14분) |
 | 번역 (Gemini) | 5분 |
 | Remotion 렌더 (2병렬) | 60~90분 |
 | 플레이리스트 머지 | 15~25분 |

@@ -494,13 +494,79 @@ ffmpeg -ss {actual_start} -t {duration} -i {video_path} \
 
 ### 11-9. 업로드 스크립트
 
-> 스크립트: `scripts/upload_shorts_lucidwhite.py`
+> 스크립트: `scripts/upload_shorts.py` (채널 범용 — 2026-04-14 리팩터링)
+
+```bash
+python3 scripts/upload_shorts.py <channel> <vol_id> <private|unlisted|public>
+# 예:
+python3 scripts/upload_shorts.py lucidwhite hero-vol2 private
+python3 scripts/upload_shorts.py season    hero-vol2 private
+```
+
+**채널 설정 (`CHANNELS` dict, 스크립트 상단)**:
+| 채널 키 | channel_id | token_path | full_video_key |
+|---------|-----------|-----------|---------------|
+| `lucidwhite` | `UCoHpJmMju00FPBogQr6D_Kw` | `youtube_token_lucidwhite.json` | `lucidwhite_video_id` |
+| `season` | `UC2ofS0Y6ynIjRSVwexUUWQg` | `youtube_token_jpop.json` | `season_video_id` |
 
 - DB 없이 `05_shorts/*.mp4` 직접 스캔
-- 결과 저장: `05_shorts/upload_result_lucidwhite.json`
-- 제목: 풀영상 제목과 동일 (`VIDEO_TITLE` 하드코딩 — 향후 youtube_meta.json에서 읽도록 교체 예정)
-- Privacy: PRIVATE → "Save" 버튼 / PUBLIC → "Publish" 버튼
+- 결과 저장: `05_shorts/upload_result_{channel}.json` (채널별 독립)
+- 제목: `youtube_meta.json`의 채널별 title_key 필드에서 읽음
+- Privacy: **UNLISTED 권장** (댓글창 활성화됨, 검색 노출 없음) / PRIVATE은 댓글 불가 / PUBLIC은 "Publish" 버튼
+- UNLISTED/PRIVATE → "Save" 버튼 / PUBLIC → "Publish" 버튼
 - 업로드 직후 browser-use로 댓글 달기 (API 사용 안 함)
+- **각 업로드 전 `assert_lw_studio()` 채널 URL 재검증** → 이탈 시 자동 재진입 또는 즉시 중단
+- video_id 추출: 60초 폴링 루프 (`watch?v=` 셀렉터 제외 — 풀영상 ID 오염 방지)
+
+#### ⚠️ 실제 발생한 오류 (2026-04-14)
+
+| 오류 | 원인 | 증상 | 해결 |
+|------|------|------|------|
+| 잘못된 채널 업로드 | `browser-use --profile nicejames` 실행 시 Studio 활성 채널이 세션 도중 nicejames로 변경됨 | 로컬 JSON에는 success 기록되나 대상 채널에 영상 없음 | 업로드 후 API `videos().list()`로 channelId 검증 필수 |
+| 풀영상 없는 상태에서 쇼츠 업로드 | `lucidwhite_video_id` 없이 업로드 실행 | 댓글 링크 비어있음 (dead link 위험) | 업로드 전 preflight_check로 차단 |
+
+#### 필수 사전 검증 (preflight_check)
+
+```python
+def preflight_check(vol_dir):
+    """쇼츠 업로드 전 필수 검증. 실패 시 즉시 중단."""
+    meta_path = vol_dir / 'youtube_meta.json'
+    if not meta_path.exists():
+        raise SystemExit("❌ youtube_meta.json 없음")
+    
+    meta = json.load(open(meta_path))
+    full_video_id = meta.get('lucidwhite_video_id', '')
+    if not full_video_id:
+        raise SystemExit("❌ lucidwhite_video_id 없음 — 풀영상을 먼저 업로드하고 youtube_meta.json에 기록하세요")
+    
+    # API로 풀영상 실존 확인
+    creds = Credentials.from_authorized_user_file(TOKEN_PATH)
+    yt = build('youtube', 'v3', credentials=creds)
+    resp = yt.videos().list(part='snippet', id=full_video_id).execute()
+    if not resp.get('items'):
+        raise SystemExit(f"❌ 풀영상 {full_video_id} YouTube에 없음")
+    
+    print(f"✅ 풀영상 확인: {full_video_id}")
+    return full_video_id
+```
+
+#### 채널 검증 (업로드 후)
+
+```python
+EXPECTED_CHANNEL_ID = 'UCoHpJmMju00FPBogQr6D_Kw'  # Lucid White
+
+def verify_channel(video_id, token_path):
+    creds = Credentials.from_authorized_user_file(token_path)
+    yt = build('youtube', 'v3', credentials=creds)
+    resp = yt.videos().list(part='snippet', id=video_id).execute()
+    if not resp.get('items'):
+        return False
+    actual = resp['items'][0]['snippet']['channelId']
+    if actual != EXPECTED_CHANNEL_ID:
+        log(f"  ❌ 채널 오류: {resp['items'][0]['snippet']['channelTitle']} ({actual})")
+        return False
+    return True
+```
 
 ### 11-10. 댓글 템플릿 (Lucid White)
 
@@ -524,14 +590,27 @@ The echoes that linger long after the music stops. ❘ Experience the full 51-mi
 - [ ] 병렬 실행 시 tmp 경로 곡별 분리
 - [ ] ffmpeg 프로세스 완료 확인 (moov atom 에러 주의)
 
-### 업로드 전
+### 업로드 전 ⚠️ (순서 엄수)
+- [ ] **풀영상이 먼저 업로드 완료됐는지 확인** (쇼츠보다 반드시 먼저)
+- [ ] **youtube_meta.json에 `lucidwhite_video_id` 기록됐는지 확인**
+- [ ] API로 풀영상 video_id 실존 확인 (preflight_check)
 - [ ] 쇼츠 영상 재생 확인 (가사 가독성, 오디오 싱크)
-- [ ] 풀영상 ID 확보 (댓글 링크용)
-- [ ] 채널 15분+ 인증 상태 확인 (풀영상용)
+- [ ] 채널 OAuth 토큰 유효 확인 (`~/.claude/youtube_token_lucidwhite.json`)
+- [ ] Studio에서 현재 활성 채널이 Lucid White인지 수동 확인
 
 ### 업로드 후
-- [ ] upload_result.json 저장 확인
-- [ ] 비공개 상태에서 영상 확인 → 공개 전환
-- [ ] 댓글 달기 완료 → comment_result.json 저장
+- [ ] **API로 video_id의 channelId 검증** (Lucid White = `UCoHpJmMju00FPBogQr6D_Kw`)
+- [ ] upload_result_lucidwhite.json 저장 확인
+- [ ] 비공개(PRIVATE) 상태에서 영상 확인 → UNLISTED 또는 PUBLIC 전환
+- [ ] 댓글 달기 완료 → comment_result_lucidwhite.json 저장
 - [ ] Vol 번호 없이 독립 제목 (시리즈 아님)
 - [ ] AI 언급 절대 금지
+
+### 오류 발생 시 복구 절차
+
+| 상황 | 확인 명령 | 조치 |
+|------|---------|------|
+| 잘못된 채널 업로드 의심 | `videos().list(part='snippet', id=video_id)` → channelTitle 확인 | 영상 삭제 + JSON 초기화 + 재업로드 |
+| upload_result.json에는 있는데 YouTube에 없음 | 위 API 확인 | JSON에서 해당 항목 제거 후 재업로드 |
+| 댓글 미게시 | comment_result.json 확인 | UNLISTED/PUBLIC 전환 후 API 댓글 |
+| 풀영상 dead link | `lucidwhite_video_id` 영상 상태 확인 | 풀영상 재업로드 후 comment 수정 |

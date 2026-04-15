@@ -103,6 +103,18 @@ python3 scripts/suno_workspace_sync.py
 | workspace에 곡 추가 | POST | `/api/project/{id}/clips` |
 | workspace 이름/설명 변경 | POST | `/api/project/{id}/metadata` + `{"name":"...", "description":"..."}` |
 | workspace 삭제/복원 | POST | `/api/project/trash` + `{"project_id":"...", "undo_trash": false\|true}` |
+| 곡 생성 (cover/일반) | POST | `/api/generate/v2-web/` — `control_sliders.style_weight`, `control_sliders.audio_weight` (cover 시 `task:"cover"`, `metadata.is_remix:true`) |
+| 클립 단건 조회 | GET | `/api/clip/{id}` |
+| 파형 데이터 조회 | GET | `/api/gen/{id}/waveform-aggregates` — 생성 완료(status:"complete") 후에만 유효 |
+| 오디오 업로드 (1) 초기화 | POST | `/api/uploads/audio/` + `{"extension":"mp3"}` |
+| 오디오 업로드 (2) S3 전송 | PUT | presigned URL (응답의 `url`+`fields`) |
+| 오디오 업로드 (3) 완료 | POST | `/api/uploads/audio/{id}/upload-finish/` + `{"upload_type":"file_upload","upload_filename":"..."}` |
+| 오디오 업로드 (4) 상태 폴링 | GET | `/api/uploads/audio/{id}/` — `status:"complete"` 까지 반복 |
+| 오디오 업로드 (5) 클립 초기화 | POST | `/api/uploads/audio/{id}/initialize-clip/` + `{}` |
+| 클립 메타데이터 설정 | POST | `/api/gen/{id}/set_metadata/` + `{"title":"...","is_audio_upload_tos_accepted":true}` |
+| Gemini 설명 수락 | POST | `/api/gen/{id}/set_audio_description` + `{"gemini_description_accepted":true}` |
+| CAPTCHA 확인 | POST | `/api/c/check` + `{"ctype":"generation"}` |
+| **계정 목록 조회** | GET | `/api/accounts` — 현재 로드된 Suno 계정 정보 반환 (zach-suno-api 내부 API) |
 
 **인증**: `__client` 쿠키(JWT refresh token, 만료 1년) → Clerk API로 60초짜리 JWT 무한 갱신 → Bearer 토큰으로 사용
 
@@ -334,12 +346,15 @@ def generate_song(song_config: dict, playlist_folder: str):
     v1_track = tracks[0]
     suno_id_v1 = v1_track["id"]
 
-    # 3. v5.5 Cover 업그레이드
-    resp_v2 = requests.post(f"{SUNO_API}/cover", json={
-        "source_id": suno_id_v1,
+    # 3. v5.5 Cover 업그레이드 (/api/generate_v2web 사용, 프록시 0225_req.txt 기준)
+    resp_v2 = requests.post(f"{SUNO_API}/generate_v2web", json={
+        "title": song_config["title"],
+        "tags": song_config["style"],
+        "prompt": song_config["lyrics"],
         "mv": "chirp-fenix",
-        "audio_influence": 1.0,
-        "style_influence": 0.3,
+        "cover_clip_id": suno_id_v1,
+        "style_weight": 0.5,   # control_sliders.style_weight
+        "audio_weight": 0.81,  # control_sliders.audio_weight (cover 시)
         "weirdness": 0.2,
     })
     v2_track = resp_v2.json()[0]
@@ -628,7 +643,8 @@ gems.db 저장 (suno_tracks 테이블)
       "lyrics": "[Verse 1]\n朝焼けの空に...\n[Chorus]\nこの声が届くなら...",
       "vocal_gender": "female",
       "weirdness": 0.3,
-      "style_influence": 0.8,
+      "style_weight": 0.8,
+      "audio_weight": 0.81,
       "make_instrumental": false
     },
     {
@@ -637,7 +653,7 @@ gems.db 저장 (suno_tracks 테이블)
       "lyrics": "[Verse 1]\n...",
       "vocal_gender": "male",
       "weirdness": 0.2,
-      "style_influence": 0.9,
+      "style_weight": 0.9,
       "make_instrumental": false
     }
   ]
@@ -667,7 +683,8 @@ gems.db 저장 (suno_tracks 테이블)
 | `lyrics` | string | 필수 | 전체 가사 ([Verse][Chorus][Bridge] 구조) 또는 "[Instrumental]" |
 | `vocal_gender` | string | 선택 | "female" \| "male" \| null (미지정) |
 | `weirdness` | float | 선택 | 0.0~1.0 (Suno weirdness 파라미터, 기본: 0.5) |
-| `style_influence` | float | 선택 | 0.0~1.0 (Cover 모드에서 소스 스타일 따를 정도, 기본: 0.8) |
+| `style_weight` | float | 선택 | 0.0~1.0 (스타일 반영 비율, `control_sliders.style_weight`로 전송, 기본: 0.5) |
+| `audio_weight` | float | 선택 | 0.0~1.0 (Cover 시 소스 오디오 반영 비율, `control_sliders.audio_weight`로 전송, 기본: 0.81) |
 | `make_instrumental` | boolean | 선택 | Instrumental 곡 생성 여부 (기본: false) |
 
 ### 9-3. Workspace 자동 관리
@@ -982,21 +999,20 @@ def generate_song_cover(
         "prompt": song_config.get("lyrics"),
         "tags": song_config.get("style"),
         "negative_tags": song_config.get("negative_tags", ""),
-        "model": "chirp-fenix",
+        "mv": "chirp-fenix",
         "cover_clip_id": cover_clip_id,
-        "is_remix": True,
-        "audio_influence": 1.0,  # 소스 오디오 100% 유지
-        "style_influence": song_config.get("style_influence", 0.8),
+        # control_sliders 내부 필드 (프록시 확인: 0225_req.txt)
+        "style_weight": song_config.get("style_weight", 0.5),   # 0.0~1.0
+        "audio_weight": song_config.get("audio_weight", 0.81),  # cover 시 오디오 반영 비율
         "weirdness": song_config.get("weirdness", 0.5),
-        "wait_audio": False,
     }
     
-    # 부성 지정 (선택)
+    # 보컬 성별 지정 (선택)
     if song_config.get("vocal_gender"):
         payload["vocal_gender"] = song_config["vocal_gender"]
     
     resp = requests.post(
-        f"{suno_api_base}/api/custom_generate",
+        f"{suno_api_base}/api/generate_v2web",
         json=payload
     )
     

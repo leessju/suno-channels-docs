@@ -521,9 +521,90 @@ python test.py --audio input.mp3
 
 ---
 
-## 13. 참고
+## 13. midi_cover.py — 자동화 스크립트 사용법
+
+A/B 테스트 결과를 바탕으로 제작된 **6단계 MIDI Cover 자동화 파이프라인**.  
+경로: `~/Projects/clones/zach-suno-api/scripts/midi_cover.py`
+
+### 파이프라인 단계
+
+```
+Step 0: MP3 파일 또는 YouTube URL → mp3 다운로드 (yt-dlp)
+Step 1: Demucs → 보컬 제거 (other + bass + drums 믹스)
+Step 2: Chordino → 코드 추출 + Key 필터링 → chords.json
+Step 3: 코드 JSON → MIDI → FluidSynth → chords.mp3
+Step 4: /api/upload_audio → Suno clip_id 획득
+Step 5: /api/custom_generate (cover_clip_id + 가사 + 스타일) → 곡 생성
+Step 6: (--wait 옵션) 생성 완료 대기 → mp3 다운로드
+```
+
+### 기본 사용법
+
+```bash
+# MP3 파일 → Cover 생성
+python3 scripts/midi_cover.py /path/to/song.mp3 \
+  --style "emotional J-pop, bright piano, 84 BPM" \
+  --title "Hero Cover"
+
+# YouTube URL → Cover 생성
+python3 scripts/midi_cover.py "https://youtube.com/watch?v=xxx" \
+  --style "phonk, dark" \
+  --title "Cover"
+```
+
+### 전체 옵션
+
+```bash
+python3 scripts/midi_cover.py song.mp3 \
+  --style "emotional J-pop, bright piano, 84 BPM" \
+  --title "Hero Cover" \
+  --lyrics lyrics.txt          # 가사 파일 (없으면 "[Instrumental]")
+  --model chirp-fenix           # Suno 모델 (기본: chirp-fenix)
+  --soundfont ~/Music/sf2/FluidR3_GM.sf2  # SoundFont 경로
+  --api http://localhost:3001   # Suno API 주소
+  --output ./output             # 출력 디렉토리
+  --wait                        # 생성 완료 대기 후 mp3 다운로드
+  --skip-demucs                 # 이미 보컬 제거된 파일인 경우
+```
+
+### 전제 조건
+
+| 도구 | 설치 | 역할 |
+|---|---|---|
+| `demucs` | `pip install demucs` | 보컬 제거 |
+| `chord_extractor` (Chordino) | conda env `chord310` | 코드 추출 |
+| `mido` | `pip install mido` | MIDI 생성 |
+| `fluidsynth` | `brew install fluid-synth` | MIDI → WAV 렌더링 |
+| `ffmpeg` | `brew install ffmpeg` | WAV → MP3 변환 |
+| `yt-dlp` | `pip install yt-dlp` | YouTube 다운로드 (URL 입력 시) |
+
+### 출력물
+
+```
+output/
+├── original.mp3        # 원본 (YouTube 다운로드 시)
+├── no_vocal.wav        # Demucs 보컬 제거 결과
+├── chords.json         # 추출된 코드 진행 + Key
+├── chords.mid          # 생성된 MIDI
+├── chords.mp3          # FluidSynth 렌더링 결과 (Suno 업로드용)
+├── cover_XXXXXXXX.mp3  # 생성된 Cover 곡 (--wait 시)
+└── metadata.json       # 생성 메타데이터 (key, chords, clip_id, song_ids)
+```
+
+### A/B 테스트 결론과의 연결
+
+| 테스트 조건 | midi_cover.py 대응 |
+|---|---|
+| D: Demucs→BP 하모니 → cover (권장) | 기본 동작 (--skip-demucs 없으면) |
+| E: 노트 밀도 최소 | Chordino `roll_on=0.5` + Key 필터로 구현 |
+| A: Logic MIDI (최고 품질) | --skip-demucs + 직접 MIDI mp3 지정 |
+
+---
+
+## 14. 참고
 
 - Suno API: `~/Projects/clones/zach-suno-api/`
+- midi_cover.py: `~/Projects/clones/zach-suno-api/scripts/midi_cover.py`
 - Proxelar 캡처: `~/Projects/clones/prox_cli/captured/suno/`
 - A/B 테스트 스크립트: `~/Music/suno-channels/phonk/cover_ab_test/run_ab_test.sh`
 - MIDI 비교: `~/Music/suno-channels/phonk/midi_comparison/`

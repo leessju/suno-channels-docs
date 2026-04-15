@@ -426,6 +426,17 @@ document.querySelectorAll("[invalid]")
 https://studio.youtube.com/channel/{CHANNEL_ID}
 ```
 
+### Studio 채널 URL 직접 접근 → permission denied
+**원인**: `https://studio.youtube.com/channel/{CHANNEL_ID}` 로 직접 이동 시 일부 채널에서 권한 오류 발생
+**해결**: `https://studio.youtube.com` (루트)로 이동 후 Studio가 자동으로 올바른 채널로 전환되게 함
+```python
+# ❌ 권한 오류 발생 가능
+bu('open', f'https://studio.youtube.com/channel/{CHANNEL_ID}')
+
+# ✅ 안정적
+bu('open', 'https://studio.youtube.com')
+```
+
 ### 쇼츠 업로드 Close 다이얼로그 실패
 **해결**: `offsetParent !== null` 필터 필수
 ```javascript
@@ -513,3 +524,199 @@ def upload_playlist_batch(
 5. **제목 길이 제한** — YouTube는 100자 제한, 초과 시 모든 버튼 disabled
 6. **Private에는 댓글 불가** — Public 전환 후 댓글
 7. **5개 영상 기준 소요 시간**: 머지 25분 + 업로드 30분 + 메타 1분 + 댓글 1분 ≈ **총 1시간**
+
+---
+
+## 11. 업로드 순서 정책 (필수 준수)
+
+> 쇼츠의 목적은 **풀영상 후킹(트래픽 유도)**이므로 반드시 아래 순서를 지켜야 한다.
+
+```
+[1단계] 풀영상 업로드
+    ↓  video_id 획득
+[2단계] youtube_meta.json에 video_id 기록
+    ↓  lucidwhite_video_id / jpop_video_id 등
+[3단계] 쇼츠 렌더 (댓글 링크 포함된 텍스트 오버레이)
+    ↓
+[4단계] 쇼츠 업로드 (댓글에 풀영상 링크 포함)
+```
+
+### 위반 시 발생하는 문제
+
+| 순서 위반 | 결과 |
+|----------|------|
+| 쇼츠 먼저 업로드, 풀영상 나중 | 댓글의 youtu.be 링크가 dead link |
+| 풀영상 video_id 없이 쇼츠 업로드 | 댓글 내용 비어있거나 누락 |
+| 채널 확인 없이 업로드 | 엉뚱한 채널에 올라감 (실제 발생한 오류) |
+
+### 업로드 전 필수 확인 (코드)
+
+```python
+def preflight_check(meta_path, shorts_dir, target_channel_id, token_path):
+    """업로드 전 사전 검증. 실패 시 즉시 중단."""
+    errors = []
+
+    # 1. 풀영상 video_id 확인
+    meta = json.load(open(meta_path))
+    full_video_id = meta.get('lucidwhite_video_id') or meta.get('video_id', '')
+    if not full_video_id:
+        errors.append("❌ 풀영상 video_id 없음 — youtube_meta.json에 lucidwhite_video_id 필수")
+
+    # 2. 풀영상이 실제로 존재하는지 API 확인
+    if full_video_id:
+        creds = Credentials.from_authorized_user_file(token_path)
+        yt = build('youtube', 'v3', credentials=creds)
+        resp = yt.videos().list(part='status', id=full_video_id).execute()
+        if not resp.get('items'):
+            errors.append(f"❌ 풀영상 {full_video_id} YouTube에 없음 — 업로드 여부 확인")
+
+    # 3. 쇼츠 파일 존재 확인
+    shorts = list(Path(shorts_dir).glob('*_shorts.mp4'))
+    if not shorts:
+        errors.append(f"❌ 쇼츠 파일 없음: {shorts_dir}")
+
+    if errors:
+        for e in errors:
+            print(e)
+        raise SystemExit("사전 검증 실패. 업로드 중단.")
+    
+    print(f"✅ 사전 검증 통과: 풀영상={full_video_id}, 쇼츠={len(shorts)}개")
+    return full_video_id
+```
+
+---
+
+## 12. 채널 검증 로직
+
+> **실제 발생한 오류 (2026-04-14)**: browser-use `--profile nicejames`로 Studio 접속 시  
+> vol1은 Lucid White 채널에 올라갔지만 vol2/ref-vol2는 nicejames 채널에 올라감.  
+> Studio의 활성 채널이 세션 중간에 바뀐 것으로 추정. 로컬 JSON에는 성공으로 기록됨.
+
+### 채널 검증 방법
+
+**방법 1: 업로드 전 Studio 채널 확인 (browser-use eval)**
+```python
+# Studio 접속 후 현재 채널명 읽기
+channel_name = bu_eval(
+    "document.querySelector('#account-header yt-img-shadow')?.getAttribute('alt') || "
+    "document.querySelector('.ytcp-channel-name')?.textContent?.trim()"
+)
+EXPECTED_CHANNEL = "Lucid White"  # 또는 채널 ID로 비교
+if channel_name != EXPECTED_CHANNEL:
+    raise SystemExit(f"❌ 잘못된 채널: {channel_name} (기대: {EXPECTED_CHANNEL}). 업로드 중단.")
+```
+
+**방법 2: 업로드 후 API로 채널 검증 (권장)**
+```python
+def verify_upload_channel(video_id, expected_channel_id, token_path):
+    """업로드된 video_id가 올바른 채널에 있는지 확인"""
+    creds = Credentials.from_authorized_user_file(token_path)
+    yt = build('youtube', 'v3', credentials=creds)
+    resp = yt.videos().list(part='snippet', id=video_id).execute()
+    
+    if not resp.get('items'):
+        return False, "영상 없음"
+    
+    actual_channel = resp['items'][0]['snippet']['channelId']
+    actual_title   = resp['items'][0]['snippet']['channelTitle']
+    
+    if actual_channel != expected_channel_id:
+        return False, f"❌ 잘못된 채널: {actual_title} ({actual_channel})"
+    
+    return True, f"✅ 채널 확인: {actual_title}"
+```
+
+### 채널 ID 상수
+```python
+CHANNEL_IDS = {
+    'lucidwhite': 'UCoHpJmMju00FPBogQr6D_Kw',
+    'jpop':       'UC2ofS0Y6ynIjRSVwexUUWQg',
+    'cafe':       'UCSvzzpXpaXwRWi3G-grk_7A',
+    'phonk':      'UC0OSrx55lFo7ELCMo88mxUw',
+    'nicejames':  'UCxxxxxxxxxxxxxxxxxxxxxxxx',  # 개인 채널 (업로드 금지)
+}
+```
+
+### 잘못된 채널에 올라갔을 때 조치
+
+1. API로 전체 video_id 목록의 채널 확인
+2. 잘못 올라간 영상 삭제 (`videos().delete()`)
+3. `upload_result_lucidwhite.json` 초기화 (`{}`)
+4. 올바른 채널 선택 후 재업로드
+
+```python
+def delete_wrong_channel_videos(video_ids, token_path):
+    """잘못된 채널에 올라간 영상 일괄 삭제"""
+    creds = Credentials.from_authorized_user_file(token_path)
+    yt = build('youtube', 'v3', credentials=creds)
+    for vid in video_ids:
+        yt.videos().delete(id=vid).execute()
+        print(f"  삭제: {vid}")
+```
+
+---
+
+## 13. 웹 관리 시스템 연동 고려사항
+
+> 향후 웹사이트를 통해 데이터/프로세스 관리 예정.  
+> 아래 사항들을 설계 시 반영해야 한다.
+
+### 13-1. 데이터 모델 (DB 스키마 예시)
+
+```sql
+-- 볼륨(플레이리스트) 단위
+CREATE TABLE volumes (
+    id            TEXT PRIMARY KEY,   -- "260402_hero-vol1"
+    channel       TEXT NOT NULL,       -- "lucidwhite" | "jpop"
+    full_video_id TEXT,                -- YouTube video_id (NULL = 아직 미업로드)
+    full_uploaded_at TIMESTAMP,
+    status        TEXT DEFAULT 'pending'  -- pending | rendered | uploaded | published
+);
+
+-- 쇼츠 단위
+CREATE TABLE shorts (
+    id            SERIAL PRIMARY KEY,
+    volume_id     TEXT REFERENCES volumes(id),
+    filename      TEXT NOT NULL,       -- "01_ヒーローになれなくても_shorts.mp4"
+    video_id      TEXT,                -- YouTube short video_id
+    channel_id    TEXT,                -- 실제 업로드된 채널 ID (검증용)
+    commented     BOOLEAN DEFAULT FALSE,
+    privacy       TEXT DEFAULT 'private',
+    uploaded_at   TIMESTAMP,
+    error         TEXT                 -- 오류 메시지 기록
+);
+```
+
+### 13-2. 프로세스 상태 머신
+
+```
+[INIT] → [RENDERED] → [FULL_UPLOADED] → [SHORTS_UPLOADED] → [COMMENTED] → [PUBLISHED]
+                              ↑
+                        이 단계 없이 SHORTS_UPLOADED로 가면 안 됨 (정책)
+```
+
+### 13-3. API 엔드포인트 설계 (예시)
+
+```
+POST /api/volumes/{id}/upload-full    # 풀영상 업로드 트리거
+GET  /api/volumes/{id}/status         # 전체 상태 확인
+POST /api/volumes/{id}/upload-shorts  # 쇼츠 업로드 트리거 (풀영상 없으면 400)
+POST /api/volumes/{id}/comment        # 댓글 일괄 달기
+GET  /api/volumes/{id}/verify         # 채널 검증 결과 조회
+```
+
+### 13-4. 오류 로깅 요구사항
+
+웹 시스템에서 추적해야 할 오류 유형:
+
+| 오류 | 감지 방법 | 조치 |
+|------|---------|------|
+| 잘못된 채널 업로드 | 업로드 후 API channel_id 비교 | 삭제 후 재업로드 |
+| 풀영상 없이 쇼츠 업로드 | preflight_check에서 차단 | 풀영상 먼저 업로드 |
+| video_id 추출 실패 | upload_result.json에 null | 수동 확인 후 재시도 |
+| 댓글 미게시 (Private) | comment_result.json 누락 | Public 전환 후 재시도 |
+| 토큰 만료 | API 401 응답 | gen_token 재실행 |
+
+---
+
+## 7. 트러블슈팅
